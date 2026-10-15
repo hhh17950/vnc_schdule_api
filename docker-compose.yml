@@ -25,7 +25,6 @@ services:
     environment:
       VNC_DATABASE_URL: postgresql+asyncpg://vnc:${VNC_DEV_DB_PASSWORD:?set VNC_DEV_DB_PASSWORD}@postgres:5432/vnc_schedule
       VNC_REDIS_URL: redis://redis:6379/0
-      VNC_INTERNAL_TOKEN: ${VNC_INTERNAL_TOKEN:?set VNC_INTERNAL_TOKEN}
     ports:
       - "127.0.0.1:8088:8088"
     depends_on:

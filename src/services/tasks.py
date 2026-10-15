@@ -17,6 +17,7 @@ def utcnow() -> datetime:
 def task_payload_equal(task: Task, payload: TaskCreate) -> bool:
     return (
         task.command == payload.command
+        and task.cwd == payload.cwd
         and task.input_path == payload.input_path
         and task.timeout_seconds == (payload.timeout_seconds or get_settings().task_timeout_seconds)
     )
@@ -31,7 +32,7 @@ async def create_task(session: AsyncSession, payload: TaskCreate, key: str | Non
             return existing
     now = utcnow()
     task = Task(
-        command=payload.command, input_path=payload.input_path,
+        command=payload.command, cwd=payload.cwd, input_path=payload.input_path,
         timeout_seconds=payload.timeout_seconds or get_settings().task_timeout_seconds,
         idempotency_key=key, created_at=now, updated_at=now,
     )
@@ -79,7 +80,7 @@ async def claim_task(session: AsyncSession, worker_id: str, payload: ClaimReques
     worker = await session.scalar(select(Worker).where(Worker.id == worker_id).with_for_update())
     if worker is None or worker.session_id != payload.session_id or worker.lease_until <= now:
         raise HTTPException(status_code=409, detail="worker session expired")
-    if payload.slot_id not in worker.capabilities.get("slot_ids", []):
+    if payload.slot_id not in worker.slot_ids:
         raise HTTPException(status_code=409, detail="slot is not registered")
     task = await session.scalar(select(Task).where(Task.id == payload.task_id).with_for_update())
     if task and task.status == "running" and task.current_attempt_id:
@@ -87,8 +88,9 @@ async def claim_task(session: AsyncSession, worker_id: str, payload: ClaimReques
         previous = await session.get(TaskAttempt, task.current_attempt_id)
         if previous and previous.worker_id == worker_id and previous.session_id == payload.session_id and previous.slot_id == payload.slot_id:
             return ClaimResult(
-                attempt_id=previous.id, command=task.command, input_path=task.input_path,
-                timeout_seconds=task.timeout_seconds, deadline_at=previous.deadline_at,
+                attempt_id=previous.id, command=task.command, cwd=task.cwd,
+                input_path=task.input_path,
+                deadline_timestamp=previous.deadline_at.timestamp(),
             )
     if task is None or task.status != "queued":
         raise HTTPException(status_code=409, detail="task is not claimable")
@@ -114,8 +116,9 @@ async def claim_task(session: AsyncSession, worker_id: str, payload: ClaimReques
     task.updated_at = now
     await session.commit()
     return ClaimResult(
-        attempt_id=attempt.id, command=task.command, input_path=task.input_path,
-        timeout_seconds=task.timeout_seconds, deadline_at=attempt.deadline_at,
+        attempt_id=attempt.id, command=task.command, cwd=task.cwd,
+        input_path=task.input_path,
+        deadline_timestamp=attempt.deadline_at.timestamp(),
     )
 
 

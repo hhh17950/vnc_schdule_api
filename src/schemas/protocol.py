@@ -6,6 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 class TaskCreate(BaseModel):
     command: list[str] = Field(min_length=1)
+    cwd: str = Field(min_length=1, max_length=1000)
     input_path: str | None = None
     timeout_seconds: int | None = Field(default=None, ge=1)
 
@@ -15,6 +16,7 @@ class TaskView(BaseModel):
     id: str
     status: str
     command: list[str]
+    cwd: str
     input_path: str | None
     timeout_seconds: int
     current_attempt_id: str | None
@@ -34,7 +36,12 @@ class WorkerRegister(BaseModel):
     worker_id: str = Field(min_length=1, max_length=120)
     session_id: str
     slot_ids: list[str] = Field(min_length=1)
-    capabilities: dict[str, Any] = Field(default_factory=dict)
+
+
+class WorkerRegisterResult(BaseModel):
+    worker_id: str
+    session_id: str
+    lease_seconds: int
 
 
 class SlotView(BaseModel):
@@ -49,7 +56,6 @@ class Heartbeat(BaseModel):
 
 
 class HeartbeatResult(BaseModel):
-    lease_until: datetime
     cancel_task_ids: list[str]
 
 
@@ -66,9 +72,9 @@ class ClaimRequest(BaseModel):
 class ClaimResult(BaseModel):
     attempt_id: str
     command: list[str]
+    cwd: str
     input_path: str | None
-    timeout_seconds: int
-    deadline_at: datetime
+    deadline_timestamp: float
 
 
 class ResultRequest(BaseModel):
