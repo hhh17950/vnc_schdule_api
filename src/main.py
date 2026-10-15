@@ -1,9 +1,12 @@
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.openapi.docs import get_swagger_ui_html
+from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from loguru import logger
 from redis.asyncio import Redis
 
@@ -30,9 +33,29 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await engine.dispose()
 
 
-app = FastAPI(title="VNC Schedule API", lifespan=lifespan)
+static_dir = Path(__file__).resolve().parent / "static"
+
+# 默认文档页面引用公网 CDN；内网环境改为随服务发布的固定版本资源。
+app = FastAPI(
+    title="VNC Schedule API",
+    lifespan=lifespan,
+    docs_url=None,
+    redoc_url=None,
+)
+app.mount("/static", StaticFiles(directory=static_dir), name="static")
 app.include_router(task_router)
 app.include_router(worker_router)
+
+
+@app.get("/docs", include_in_schema=False)
+async def swagger_ui() -> HTMLResponse:
+    return get_swagger_ui_html(
+        openapi_url=app.openapi_url,
+        title=f"{app.title} - Swagger UI",
+        swagger_js_url="/static/swagger-ui-bundle.js",
+        swagger_css_url="/static/swagger-ui.css",
+        swagger_favicon_url="/static/favicon-32x32.png",
+    )
 
 
 @app.get("/health")

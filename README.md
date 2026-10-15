@@ -71,7 +71,9 @@ curl -X POST \
 - 取消指令通过心跳响应持续下发，直到任务完成清理。
 - 对账循环补投长期 queued 任务，清理 abandoned pending 消息，并将失联执行标记为 `lost`。
 
-接口文档：`/docs`；OpenAPI：`/openapi.json`。
+接口文档：`/docs`；OpenAPI：`/openapi.json`。Swagger UI 5.33.3 的 JS、CSS
+和图标已保存在 `src/static/`，运行时不会访问公网 CDN。未使用的 `/redoc`
+入口已关闭，避免浏览器尝试加载外网资源。
 
 ## 测试
 
