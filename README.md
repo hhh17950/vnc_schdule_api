@@ -49,7 +49,7 @@ curl -X POST http://127.0.0.1:8088/api/v1/tasks \
   -d '{"command":["/usr/bin/true"],"timeout_seconds":7200}'
 ```
 
-`command` 是参数数组，不经 Shell 解释；只有可信上游才能调用创建接口。任务输入路径是共享存储根目录下的相对路径。报告路径是 `task_id/attempt_id/task-output.json`，清单中列出按日期及 100 MB 分片的原始输出文件。报告、截图和服务日志需分别设置清理策略。
+`command` 是参数数组，不经 Shell 解释；只有可信上游才能调用创建接口。任务输入路径是共享存储根目录下的相对路径。任务详情保存 `result_summary` 和报告相对路径；报告路径是 `task_id/attempt_id/task-output.json`，清单中列出按日期及 100 MB 分片的原始输出文件。报告、截图和服务日志需分别设置清理策略。
 
 ## 调度、取消与恢复
 

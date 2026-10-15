@@ -146,10 +146,12 @@ async def finish_task(session: AsyncSession, worker_id: str, task_id: str, paylo
     task.status = payload.status if payload.slot_clean else "lost"
     task.updated_at = now
     task.result_path = payload.result_path
+    task.result_summary = payload.result_summary
     task.error = payload.error
     attempt.status = task.status
     attempt.finished_at = now
     attempt.result_path = payload.result_path
+    attempt.result_summary = payload.result_summary
     attempt.error = payload.error
     await session.commit()
     return task

@@ -35,9 +35,11 @@ async def test_create_outbox_claim_and_finish() -> None:
         result = ResultRequest(
             session_id=session_id, attempt_id=claim.attempt_id,
             status="succeeded", slot_clean=True, result_path="result/task.log",
+            result_summary={"passed": 3, "failed": 0},
         )
         done = await finish_task(db, worker_id, task.id, result)
         assert done.status == "succeeded"
+        assert done.result_summary == {"passed": 3, "failed": 0}
         assert (await finish_task(db, worker_id, task.id, result)).status == "succeeded"
 
 

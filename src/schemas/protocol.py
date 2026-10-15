@@ -21,6 +21,7 @@ class TaskView(BaseModel):
     created_at: datetime
     updated_at: datetime
     result_path: str | None
+    result_summary: dict[str, Any] | None
     error: str | None
 
 
@@ -76,4 +77,5 @@ class ResultRequest(BaseModel):
     status: Literal["succeeded", "failed", "cancelled", "timed_out"]
     slot_clean: bool
     result_path: str | None = None
+    result_summary: dict[str, Any] | None = None
     error: str | None = None

@@ -28,6 +28,7 @@ class Task(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     last_enqueued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     result_path: Mapped[str | None] = mapped_column(String(1000))
+    result_summary: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     error: Mapped[str | None] = mapped_column(Text)
 
 
@@ -46,6 +47,7 @@ class TaskAttempt(Base):
     deadline_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     result_path: Mapped[str | None] = mapped_column(String(1000))
+    result_summary: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     error: Mapped[str | None] = mapped_column(Text)
 
 
