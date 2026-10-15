@@ -1,0 +1,38 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: vnc
+      POSTGRES_PASSWORD: ${VNC_DEV_DB_PASSWORD:?set VNC_DEV_DB_PASSWORD}
+      POSTGRES_DB: vnc_schedule
+    ports:
+      - "127.0.0.1:15432:5432"
+    volumes:
+      - vnc_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vnc -d vnc_schedule"]
+      interval: 5s
+      retries: 10
+  redis:
+    image: redis:7
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "127.0.0.1:16379:6379"
+    volumes:
+      - vnc_redis_data:/data
+  api:
+    build: .
+    environment:
+      VNC_DATABASE_URL: postgresql+asyncpg://vnc:${VNC_DEV_DB_PASSWORD:?set VNC_DEV_DB_PASSWORD}@postgres:5432/vnc_schedule
+      VNC_REDIS_URL: redis://redis:6379/0
+      VNC_INTERNAL_TOKEN: ${VNC_INTERNAL_TOKEN:?set VNC_INTERNAL_TOKEN}
+    ports:
+      - "127.0.0.1:8088:8088"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+volumes:
+  vnc_pg_data:
+  vnc_redis_data:
