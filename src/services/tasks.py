@@ -2,7 +2,6 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import HTTPException
 from sqlalchemy import func, select
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.config import get_settings
@@ -14,41 +13,16 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def task_payload_equal(task: Task, payload: TaskCreate) -> bool:
-    return (
-        task.command == payload.command
-        and task.cwd == payload.cwd
-        and task.input_path == payload.input_path
-        and task.timeout_seconds == (payload.timeout_seconds or get_settings().task_timeout_seconds)
-    )
-
-
-async def create_task(session: AsyncSession, payload: TaskCreate, key: str | None) -> Task:
-    if key:
-        existing = await session.scalar(select(Task).where(Task.idempotency_key == key))
-        if existing:
-            if not task_payload_equal(existing, payload):
-                raise HTTPException(status_code=409, detail="idempotency key already used")
-            return existing
+async def create_task(session: AsyncSession, payload: TaskCreate) -> Task:
+    # 每次创建都是一个新任务；消息重复消费仍由执行授权控制。
     now = utcnow()
     task = Task(
         command=payload.command, cwd=payload.cwd, input_path=payload.input_path,
         timeout_seconds=payload.timeout_seconds or get_settings().task_timeout_seconds,
-        idempotency_key=key, created_at=now, updated_at=now,
+        created_at=now, updated_at=now,
     )
     session.add(task)
-    try:
-        await session.flush()
-    except IntegrityError:
-        # 并发请求可能同时查不到幂等键；唯一约束决定胜者，再读取已提交任务。
-        await session.rollback()
-        if key:
-            existing = await session.scalar(select(Task).where(Task.idempotency_key == key))
-            if existing:
-                if not task_payload_equal(existing, payload):
-                    raise HTTPException(status_code=409, detail="idempotency key already used")
-                return existing
-        raise
+    await session.flush()
     # 任务和 Outbox 在同一事务提交；即使 Redis 暂时不可用也不会丢失待投递任务。
     session.add(OutboxEvent(task_id=task.id, created_at=now, next_attempt_at=now))
     await session.commit()

@@ -1,7 +1,8 @@
 from datetime import datetime
+from pathlib import PurePosixPath
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class TaskCreate(BaseModel):
@@ -9,6 +10,14 @@ class TaskCreate(BaseModel):
     cwd: str = Field(min_length=1, max_length=1000)
     input_path: str | None = None
     timeout_seconds: int | None = Field(default=None, ge=1)
+
+
+    @field_validator("cwd")
+    @classmethod
+    def absolute_cwd(cls, value: str) -> str:
+        if not PurePosixPath(value).is_absolute():
+            raise ValueError("cwd 必须是 Worker 物理机上的绝对路径")
+        return value
 
 
 class TaskView(BaseModel):

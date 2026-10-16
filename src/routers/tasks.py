@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.database import get_session
@@ -12,9 +12,8 @@ router = APIRouter(prefix="/api/v1/tasks", tags=["tasks"])
 @router.post("", response_model=TaskView, status_code=status.HTTP_201_CREATED)
 async def create(
     payload: TaskCreate, session: AsyncSession = Depends(get_session),
-    idempotency_key: str | None = Header(default=None),
 ) -> Task:
-    return await create_task(session, payload, idempotency_key)
+    return await create_task(session, payload)
 
 
 @router.get("", response_model=TaskPage)

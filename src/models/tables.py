@@ -18,7 +18,6 @@ class Task(Base):
     __tablename__ = "tasks"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
-    idempotency_key: Mapped[str | None] = mapped_column(String(200), unique=True)
     command: Mapped[list[str]] = mapped_column(JSON)
     cwd: Mapped[str] = mapped_column(String(1000))
     input_path: Mapped[str | None] = mapped_column(String(1000))

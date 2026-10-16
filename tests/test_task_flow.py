@@ -35,9 +35,9 @@ async def test_create_outbox_claim_and_finish() -> None:
     session_id = str(uuid4())
     async with session_factory() as db:
         await register_worker(db, WorkerRegister(worker_id=worker_id, session_id=session_id, slot_ids=["user1"]))
-        task = await create_task(db, TaskCreate(command=["/bin/true"], cwd="cases/demo"), str(uuid4()))
+        task = await create_task(db, TaskCreate(command=["/bin/true"], cwd="/cases/demo"))
         assert task.timeout_seconds == 7200
-        assert task.cwd == "cases/demo"
+        assert task.cwd == "/cases/demo"
         event = await db.scalar(select(OutboxEvent).where(OutboxEvent.task_id == task.id))
         assert event is not None
         claim = await claim_task(db, worker_id, ClaimRequest(
@@ -47,7 +47,7 @@ async def test_create_outbox_claim_and_finish() -> None:
             session_id=session_id, slot_id="user1", task_id=task.id,
         ))
         assert again.attempt_id == claim.attempt_id
-        assert claim.cwd == "cases/demo"
+        assert claim.cwd == "/cases/demo"
         assert claim.deadline_timestamp > 0
         result = ResultRequest(
             session_id=session_id, attempt_id=claim.attempt_id,
@@ -66,7 +66,7 @@ async def test_cancel_queued_prevents_claim() -> None:
     session_id = str(uuid4())
     async with session_factory() as db:
         await register_worker(db, WorkerRegister(worker_id=worker_id, session_id=session_id, slot_ids=["user1"]))
-        task = await create_task(db, TaskCreate(command=["/bin/true"], cwd="."), str(uuid4()))
+        task = await create_task(db, TaskCreate(command=["/bin/true"], cwd="/tmp"))
         assert (await cancel_task(db, task.id)).status == "cancelled"
         with pytest.raises(HTTPException) as error:
             await claim_task(db, worker_id, ClaimRequest(
@@ -83,7 +83,7 @@ async def test_unregistered_slot_cannot_claim() -> None:
         await register_worker(db, WorkerRegister(
             worker_id=worker_id, session_id=session_id, slot_ids=["user1"],
         ))
-        task = await create_task(db, TaskCreate(command=["/bin/true"], cwd="."), str(uuid4()))
+        task = await create_task(db, TaskCreate(command=["/bin/true"], cwd="/tmp"))
         with pytest.raises(HTTPException) as error:
             await claim_task(db, worker_id, ClaimRequest(
                 session_id=session_id, slot_id="user2", task_id=task.id,
@@ -92,30 +92,15 @@ async def test_unregistered_slot_cannot_claim() -> None:
 
 
 @pytest.mark.asyncio
-async def test_idempotency_key() -> None:
-    key = str(uuid4())
+async def test_repeated_create_produces_distinct_tasks_and_outbox() -> None:
     async with session_factory() as db:
-        first = await create_task(db, TaskCreate(command=["/bin/true"], cwd="."), key)
-        repeated = await create_task(db, TaskCreate(command=["/bin/true"], cwd="."), key)
-        assert first.id == repeated.id
-        with pytest.raises(HTTPException):
-            await create_task(db, TaskCreate(command=["/bin/false"], cwd="."), key)
-
-
-@pytest.mark.asyncio
-async def test_concurrent_idempotency_key_creates_one_task() -> None:
-    key = str(uuid4())
-
-    async def create_once() -> str:
-        async with session_factory() as db:
-            task = await create_task(db, TaskCreate(command=["/bin/true"], cwd="."), key)
-            return task.id
-
-    first, second = await asyncio.gather(create_once(), create_once())
-    assert first == second
-    async with session_factory() as db:
-        rows = (await db.scalars(select(OutboxEvent).where(OutboxEvent.task_id == first))).all()
-        assert len(rows) == 1
+        first = await create_task(db, TaskCreate(command=["/bin/true"], cwd="/tmp"))
+        repeated = await create_task(db, TaskCreate(command=["/bin/true"], cwd="/tmp"))
+        assert first.id != repeated.id
+        rows = (await db.scalars(select(OutboxEvent).where(
+            OutboxEvent.task_id.in_([first.id, repeated.id]),
+        ))).all()
+        assert len(rows) == 2
 
 
 @pytest.mark.asyncio
@@ -131,7 +116,7 @@ async def test_outbox_retries_after_redis_failure() -> None:
                 raise ConnectionError("simulated Redis outage")
 
     async with session_factory() as db:
-        task = await create_task(db, TaskCreate(command=["/bin/true"], cwd="."), str(uuid4()))
+        task = await create_task(db, TaskCreate(command=["/bin/true"], cwd="/tmp"))
     redis = BrokenRedis(task.id)
     for _ in range(20):
         await dispatch_once(redis, get_settings())
@@ -164,7 +149,7 @@ async def test_abandoned_pending_message_is_requeued() -> None:
             self.acked = True
 
     async with session_factory() as db:
-        task = await create_task(db, TaskCreate(command=["/bin/true"], cwd="."), str(uuid4()))
+        task = await create_task(db, TaskCreate(command=["/bin/true"], cwd="/tmp"))
         event = await db.scalar(select(OutboxEvent).where(OutboxEvent.task_id == task.id))
         event.sent_at = task.created_at
         await db.commit()
@@ -183,7 +168,7 @@ async def test_old_session_cannot_overwrite_lost_task() -> None:
     old_session = str(uuid4())
     async with session_factory() as db:
         await register_worker(db, WorkerRegister(worker_id=worker_id, session_id=old_session, slot_ids=["user1"]))
-        task = await create_task(db, TaskCreate(command=["/bin/true"], cwd="."), str(uuid4()))
+        task = await create_task(db, TaskCreate(command=["/bin/true"], cwd="/tmp"))
         claim = await claim_task(db, worker_id, ClaimRequest(
             session_id=old_session, slot_id="user1", task_id=task.id,
         ))
@@ -206,7 +191,7 @@ async def test_force_unregister_marks_active_attempt_lost() -> None:
             WorkerRegister(worker_id=worker_id, session_id=session_id, slot_ids=["1"]),
         )
         task = await create_task(
-            db, TaskCreate(command=["/bin/sleep", "30"], cwd="."), str(uuid4()),
+            db, TaskCreate(command=["/bin/sleep", "30"], cwd="/tmp"),
         )
         claim = await claim_task(db, worker_id, ClaimRequest(
             session_id=session_id, slot_id="1", task_id=task.id,
@@ -227,7 +212,7 @@ async def test_heartbeat_repeats_cancel_and_does_not_extend_deadline() -> None:
     session_id = str(uuid4())
     async with session_factory() as db:
         await register_worker(db, WorkerRegister(worker_id=worker_id, session_id=session_id, slot_ids=["user1"]))
-        task = await create_task(db, TaskCreate(command=["/bin/sleep", "30"], cwd="."), str(uuid4()))
+        task = await create_task(db, TaskCreate(command=["/bin/sleep", "30"], cwd="/tmp"))
         claim = await claim_task(db, worker_id, ClaimRequest(
             session_id=session_id, slot_id="user1", task_id=task.id,
         ))
@@ -256,7 +241,7 @@ async def test_expired_lease_marks_execution_unknown() -> None:
     session_id = str(uuid4())
     async with session_factory() as db:
         await register_worker(db, WorkerRegister(worker_id=worker_id, session_id=session_id, slot_ids=["user1"]))
-        task = await create_task(db, TaskCreate(command=["/bin/sleep", "30"], cwd="."), str(uuid4()))
+        task = await create_task(db, TaskCreate(command=["/bin/sleep", "30"], cwd="/tmp"))
         claim = await claim_task(db, worker_id, ClaimRequest(
             session_id=session_id, slot_id="user1", task_id=task.id,
         ))
@@ -274,7 +259,7 @@ async def test_expired_lease_marks_execution_unknown() -> None:
 @pytest.mark.asyncio
 async def test_reconcile_recreates_notification_after_redis_loss() -> None:
     async with session_factory() as db:
-        task = await create_task(db, TaskCreate(command=["/bin/true"], cwd="."), str(uuid4()))
+        task = await create_task(db, TaskCreate(command=["/bin/true"], cwd="/tmp"))
         old = utcnow() - timedelta(minutes=5)
         task.created_at = old
         task.last_enqueued_at = old

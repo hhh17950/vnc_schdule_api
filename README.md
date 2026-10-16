@@ -30,10 +30,9 @@ docker compose exec api alembic upgrade head
 ```bash
 curl -X POST http://127.0.0.1:8088/api/v1/tasks \
   -H 'Content-Type: application/json' \
-  -H 'Idempotency-Key: example-run-001' \
   -d '{
     "command":["scripts/run_case.sh","--case","demo"],
-    "cwd":"projects/demo",
+    "cwd":"/home/snskap/projects/demo",
     "timeout_seconds":7200
   }'
 
@@ -42,7 +41,11 @@ curl 'http://127.0.0.1:8088/api/v1/tasks?limit=50&offset=0'
 curl -X POST http://127.0.0.1:8088/api/v1/tasks/<task_id>/cancel
 ```
 
-`command` 是参数数组，不经过 Shell；`cwd` 和可选 `input_path` 都相对于 Worker 的共享存储根目录。
+`command` 是参数数组，不经过 Shell；`cwd` 是 Worker 物理机上的绝对目录。可选 `input_path` 相对于 `cwd`，也可以传绝对路径。不需要配置共享目录；多 Worker 共用队列时，应在各机器准备相同的任务路径和文件。
+
+每次 POST 创建一个新任务，不再使用 `Idempotency-Key`。队列重复通知仍由执行授权防止重复启动。结果 `result_path` 指向执行机器上 `VNC_LOG_DIR/tasks/<task_id>/<attempt_id>/task-output.json`，其内容分别列出带日期的 stdout/stderr 文件。
+
+升级前停止旧版本服务，再执行 `alembic upgrade head`，迁移 `0004_drop_creation_key` 删除旧字段。旧相对 cwd 的排队任务请取消后用绝对路径重新创建；API 与 Worker 应同步更新。
 
 ## Worker 操作
 
