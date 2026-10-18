@@ -4,9 +4,17 @@ from pathlib import Path
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# 仓库根目录（src/core/config.py 往上两级）。.env 固定从仓库根目录读取，
+# 这样无论从哪个工作目录启动（uvicorn、PyCharm、systemd）都能找到配置，
+# 同时不把某台机器的绝对路径写死进仓库。
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+ENV_FILE = PROJECT_ROOT / ".env"
+
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="VNC_", env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_prefix="VNC_", env_file=ENV_FILE, extra="ignore",
+    )
 
     database_url: str
     redis_url: str = "redis://127.0.0.1:6379/0"
