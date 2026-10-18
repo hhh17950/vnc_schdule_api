@@ -1,4 +1,5 @@
 # vnc_schdule_api
+VNC automation scheduling API with PostgreSQL and Redis Streams
 
 VNC GUI 测试调度 API。FastAPI 提供接口，PostgreSQL 保存任务与执行授权，Redis Stream 发送任务通知。项目名 `schdule` 保留现有拼写。
 
