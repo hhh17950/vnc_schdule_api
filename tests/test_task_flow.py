@@ -1,4 +1,3 @@
-import asyncio
 from datetime import timedelta
 from uuid import uuid4
 
@@ -8,7 +7,7 @@ from sqlalchemy import select
 
 from src.core.database import session_factory
 from src.core.config import get_settings
-from src.models import OutboxEvent, Task, TaskAttempt, Worker
+from src.models import OutboxEvent, Task, Worker
 from src.schemas.protocol import (
     ClaimRequest, ClaimResult, Heartbeat, HeartbeatResult, ResultRequest, TaskCreate,
     WorkerRegister, WorkerRegisterResult,
@@ -24,8 +23,9 @@ def test_worker_protocol_contract_fields() -> None:
         "worker_id", "session_id", "lease_seconds",
     }
     assert set(HeartbeatResult.model_fields) == {"cancel_task_ids"}
-    assert set(ClaimResult.model_fields) == {
-        "attempt_id", "command", "cwd", "input_path", "deadline_timestamp",
+    assert set(ClaimResult.model_fields) == {"command", "cwd", "deadline_timestamp"}
+    assert set(ResultRequest.model_fields) == {
+        "session_id", "status", "stdout_path", "stderr_path", "error",
     }
 
 
@@ -34,7 +34,9 @@ async def test_create_outbox_claim_and_finish() -> None:
     worker_id = f"test-{uuid4()}"
     session_id = str(uuid4())
     async with session_factory() as db:
-        await register_worker(db, WorkerRegister(worker_id=worker_id, session_id=session_id, slot_ids=["user1"]))
+        await register_worker(db, WorkerRegister(
+            worker_id=worker_id, session_id=session_id, slot_ids=["user1"],
+        ))
         task = await create_task(db, TaskCreate(command=["/bin/true"], cwd="/cases/demo"))
         assert task.timeout_seconds == 7200
         assert task.cwd == "/cases/demo"
@@ -46,17 +48,18 @@ async def test_create_outbox_claim_and_finish() -> None:
         again = await claim_task(db, worker_id, ClaimRequest(
             session_id=session_id, slot_id="user1", task_id=task.id,
         ))
-        assert again.attempt_id == claim.attempt_id
-        assert claim.cwd == "/cases/demo"
+        assert again.deadline_timestamp == claim.deadline_timestamp
+        assert again.cwd == "/cases/demo"
         assert claim.deadline_timestamp > 0
         result = ResultRequest(
-            session_id=session_id, attempt_id=claim.attempt_id,
-            status="succeeded", slot_clean=True, result_path="result/task.log",
-            result_summary={"passed": 3, "failed": 0},
+            session_id=session_id, status="succeeded",
+            stdout_path="/cases/demo/job_log/stdout.log",
+            stderr_path="/cases/demo/job_log/stderr.log",
         )
         done = await finish_task(db, worker_id, task.id, result)
         assert done.status == "succeeded"
-        assert done.result_summary == {"passed": 3, "failed": 0}
+        assert done.job_info["stdout_path"] == "/cases/demo/job_log/stdout.log"
+        assert done.job_info["stdout_id"] is None
         assert (await finish_task(db, worker_id, task.id, result)).status == "succeeded"
 
 
@@ -65,7 +68,9 @@ async def test_cancel_queued_prevents_claim() -> None:
     worker_id = f"test-{uuid4()}"
     session_id = str(uuid4())
     async with session_factory() as db:
-        await register_worker(db, WorkerRegister(worker_id=worker_id, session_id=session_id, slot_ids=["user1"]))
+        await register_worker(db, WorkerRegister(
+            worker_id=worker_id, session_id=session_id, slot_ids=["user1"],
+        ))
         task = await create_task(db, TaskCreate(command=["/bin/true"], cwd="/tmp"))
         assert (await cancel_task(db, task.id)).status == "cancelled"
         with pytest.raises(HTTPException) as error:
@@ -110,8 +115,6 @@ async def test_outbox_retries_after_redis_failure() -> None:
             self.target_task_id = target_task_id
 
         async def xadd(self, stream: str, values: dict[str, str]) -> None:
-            # 仅让本用例新建的事件失败；历史测试事件可正常排空，避免持久化
-            # 测试库中的旧数据影响本次批次顺序。
             if values["task_id"] == self.target_task_id:
                 raise ConnectionError("simulated Redis outage")
 
@@ -157,53 +160,54 @@ async def test_abandoned_pending_message_is_requeued() -> None:
     await recover_pending_once(redis, get_settings())
     assert redis.acked
     async with session_factory() as db:
-        events = (await db.scalars(select(OutboxEvent).where(OutboxEvent.task_id == task.id))).all()
+        events = (await db.scalars(select(OutboxEvent).where(
+            OutboxEvent.task_id == task.id,
+        ))).all()
         assert len(events) == 2
         assert sum(event.sent_at is None for event in events) == 1
 
 
 @pytest.mark.asyncio
-async def test_old_session_cannot_overwrite_lost_task() -> None:
+async def test_old_session_cannot_overwrite_unknown_task() -> None:
     worker_id = f"test-{uuid4()}"
     old_session = str(uuid4())
     async with session_factory() as db:
-        await register_worker(db, WorkerRegister(worker_id=worker_id, session_id=old_session, slot_ids=["user1"]))
+        await register_worker(db, WorkerRegister(
+            worker_id=worker_id, session_id=old_session, slot_ids=["user1"],
+        ))
         task = await create_task(db, TaskCreate(command=["/bin/true"], cwd="/tmp"))
-        claim = await claim_task(db, worker_id, ClaimRequest(
+        await claim_task(db, worker_id, ClaimRequest(
             session_id=old_session, slot_id="user1", task_id=task.id,
         ))
         await shutdown_worker(db, worker_id, old_session)
-        await register_worker(db, WorkerRegister(worker_id=worker_id, session_id=str(uuid4()), slot_ids=["user1"]))
-        result = await finish_task(db, worker_id, task.id, ResultRequest(
-            session_id=old_session, attempt_id=claim.attempt_id,
-            status="succeeded", slot_clean=True,
+        await register_worker(db, WorkerRegister(
+            worker_id=worker_id, session_id=str(uuid4()), slot_ids=["user1"],
         ))
-        assert result.status == "lost"
+        result = await finish_task(db, worker_id, task.id, ResultRequest(
+            session_id=old_session, status="succeeded",
+        ))
+        assert result.status == "unknown"
 
 
 @pytest.mark.asyncio
-async def test_force_unregister_marks_active_attempt_lost() -> None:
+async def test_force_unregister_marks_active_task_unknown() -> None:
     worker_id = f"test-{uuid4()}"
     session_id = str(uuid4())
     async with session_factory() as db:
-        await register_worker(
-            db,
-            WorkerRegister(worker_id=worker_id, session_id=session_id, slot_ids=["1"]),
-        )
-        task = await create_task(
-            db, TaskCreate(command=["/bin/sleep", "30"], cwd="/tmp"),
-        )
-        claim = await claim_task(db, worker_id, ClaimRequest(
+        await register_worker(db, WorkerRegister(
+            worker_id=worker_id, session_id=session_id, slot_ids=["1"],
+        ))
+        task = await create_task(db, TaskCreate(command=["/bin/sleep", "30"], cwd="/tmp"))
+        await claim_task(db, worker_id, ClaimRequest(
             session_id=session_id, slot_id="1", task_id=task.id,
         ))
         await unregister_worker(db, worker_id)
         worker = await db.get(Worker, worker_id)
-        attempt = await db.get(TaskAttempt, claim.attempt_id)
         await db.refresh(task)
         assert worker.slots == []
         assert worker.lease_until <= utcnow()
-        assert task.status == "lost"
-        assert attempt.status == "lost"
+        assert task.status == "unknown"
+        assert task.finished_at is not None
 
 
 @pytest.mark.asyncio
@@ -211,7 +215,9 @@ async def test_heartbeat_repeats_cancel_and_does_not_extend_deadline() -> None:
     worker_id = f"test-{uuid4()}"
     session_id = str(uuid4())
     async with session_factory() as db:
-        await register_worker(db, WorkerRegister(worker_id=worker_id, session_id=session_id, slot_ids=["user1"]))
+        await register_worker(db, WorkerRegister(
+            worker_id=worker_id, session_id=session_id, slot_ids=["user1"],
+        ))
         task = await create_task(db, TaskCreate(command=["/bin/sleep", "30"], cwd="/tmp"))
         claim = await claim_task(db, worker_id, ClaimRequest(
             session_id=session_id, slot_id="user1", task_id=task.id,
@@ -220,29 +226,29 @@ async def test_heartbeat_repeats_cancel_and_does_not_extend_deadline() -> None:
         pulse = Heartbeat(session_id=session_id, slots=[])
         assert task.id in (await heartbeat(db, worker_id, pulse)).cancel_task_ids
         assert task.id in (await heartbeat(db, worker_id, pulse)).cancel_task_ids
-        attempt = await db.get(TaskAttempt, claim.attempt_id)
-        assert attempt.deadline_at.timestamp() == claim.deadline_timestamp
+        await db.refresh(task)
+        assert task.deadline_at.timestamp() == claim.deadline_timestamp
         with pytest.raises(HTTPException) as error:
             await finish_task(db, worker_id, task.id, ResultRequest(
-                session_id=session_id, attempt_id=claim.attempt_id,
-                status="succeeded", slot_clean=True,
+                session_id=session_id, status="succeeded",
             ))
         assert error.value.status_code == 409
         await finish_task(db, worker_id, task.id, ResultRequest(
-            session_id=session_id, attempt_id=claim.attempt_id,
-            status="cancelled", slot_clean=True,
+            session_id=session_id, status="cancelled",
         ))
         assert task.id not in (await heartbeat(db, worker_id, pulse)).cancel_task_ids
 
 
 @pytest.mark.asyncio
-async def test_expired_lease_marks_execution_unknown() -> None:
+async def test_expired_lease_does_not_change_task_state() -> None:
     worker_id = f"test-{uuid4()}"
     session_id = str(uuid4())
     async with session_factory() as db:
-        await register_worker(db, WorkerRegister(worker_id=worker_id, session_id=session_id, slot_ids=["user1"]))
+        await register_worker(db, WorkerRegister(
+            worker_id=worker_id, session_id=session_id, slot_ids=["user1"],
+        ))
         task = await create_task(db, TaskCreate(command=["/bin/sleep", "30"], cwd="/tmp"))
-        claim = await claim_task(db, worker_id, ClaimRequest(
+        await claim_task(db, worker_id, ClaimRequest(
             session_id=session_id, slot_id="user1", task_id=task.id,
         ))
         worker = await db.get(Worker, worker_id)
@@ -251,9 +257,50 @@ async def test_expired_lease_marks_execution_unknown() -> None:
     await reconcile_once(get_settings())
     async with session_factory() as db:
         task = await db.get(Task, task.id)
-        attempt = await db.get(TaskAttempt, claim.attempt_id)
-        assert task.status == "lost"
-        assert attempt.status == "lost"
+        assert task.status == "running"
+
+
+@pytest.mark.asyncio
+async def test_reconcile_marks_timeout_requested_at_deadline() -> None:
+    worker_id = f"test-{uuid4()}"
+    session_id = str(uuid4())
+    async with session_factory() as db:
+        await register_worker(db, WorkerRegister(
+            worker_id=worker_id, session_id=session_id, slot_ids=["user1"],
+        ))
+        task = await create_task(db, TaskCreate(command=["/bin/sleep", "30"], cwd="/tmp"))
+        await claim_task(db, worker_id, ClaimRequest(
+            session_id=session_id, slot_id="user1", task_id=task.id,
+        ))
+        await db.refresh(task)
+        task.deadline_at = utcnow() - timedelta(seconds=10)
+        await db.commit()
+    await reconcile_once(get_settings())
+    async with session_factory() as db:
+        task = await db.get(Task, task.id)
+        assert task.status == "timeout_requested"
+
+
+@pytest.mark.asyncio
+async def test_reconcile_times_out_task_after_deadline_grace() -> None:
+    worker_id = f"test-{uuid4()}"
+    session_id = str(uuid4())
+    async with session_factory() as db:
+        await register_worker(db, WorkerRegister(
+            worker_id=worker_id, session_id=session_id, slot_ids=["user1"],
+        ))
+        task = await create_task(db, TaskCreate(command=["/bin/sleep", "30"], cwd="/tmp"))
+        await claim_task(db, worker_id, ClaimRequest(
+            session_id=session_id, slot_id="user1", task_id=task.id,
+        ))
+        await db.refresh(task)
+        task.deadline_at = utcnow() - timedelta(seconds=61)
+        await db.commit()
+    await reconcile_once(get_settings())
+    async with session_factory() as db:
+        task = await db.get(Task, task.id)
+        assert task.status == "timed_out"
+        assert task.finished_at is not None
 
 
 @pytest.mark.asyncio

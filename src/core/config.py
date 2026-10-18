@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     log_timezone: str = "Asia/Shanghai"
     log_retention_days: int = 30
     outbox_interval_seconds: int = 2
+    file_mgmt_url: str | None = None
 
     @property
     def stream(self) -> str:

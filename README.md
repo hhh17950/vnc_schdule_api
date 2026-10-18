@@ -1,91 +1,54 @@
 # vnc_schdule_api
 
-FastAPI 调度服务。PostgreSQL 保存任务、执行轮次、Worker 租约和 Outbox；Redis Stream 只负责任务通知。服务名 `schdule` 按项目约定保留。
+VNC GUI 测试调度 API。FastAPI 提供接口，PostgreSQL 保存任务与执行授权，Redis Stream 发送任务通知。项目名 `schdule` 保留现有拼写。
 
-## 本地启动
+## 基础结构
 
-需要 Python 3.10+、PostgreSQL 和 Redis：
+```text
+src/core/       配置、数据库连接与日志
+src/models/     tasks、workers、outbox_events
+src/schemas/    HTTP 协议
+src/routers/    任务与 Worker 接口
+src/services/   授权、结果、调度对账与文件上传
+src/static/     内网 Swagger UI 资源及许可证
+src/main.py     应用入口
+alembic/        数据库迁移
+tests/         协议及业务测试
+```
+
+## 启动
+
+使用 Python 3.10+，提前准备 PostgreSQL 和 Redis；在本仓库根目录执行：
 
 ```bash
 python3 -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
-export VNC_DATABASE_URL='postgresql+asyncpg://<用户>:<密码>@127.0.0.1:5432/vnc_schedule'
-export VNC_REDIS_URL='redis://127.0.0.1:6379/0'
+cp .env.example .env
+# 编辑 .env，填写真实数据库连接和 Redis 地址；不要提交 .env。
 .venv/bin/alembic upgrade head
 .venv/bin/uvicorn src.main:app --host 0.0.0.0 --port 8088
 ```
 
-数据库密码只通过环境变量提供，不写入源码、示例配置或 Git。
-
-开发 Compose 使用 PostgreSQL `15432`、Redis `16379` 和 API `8088`：
+`/health` 返回进程状态；`/docs` 为离线接口文档。开发 Compose 用法：
 
 ```bash
-export VNC_DEV_DB_PASSWORD='<开发数据库密码>'
+# 先在当前终端设置 VNC_DEV_DB_PASSWORD；不要把密码写进命令记录或 Git。
 docker compose up -d --build
 docker compose exec api alembic upgrade head
 ```
 
-## 创建和查询任务
+Compose 暴露数据库 15432、Redis 16379 和 API 8088（均绑定本机）。真实 Worker 位于其他机器时，需要另外配置受控的网络访问。上传日志还需将日志存储挂载给 API，并配置 VNC_FILE_MGMT_URL。
+
+任务示例：
 
 ```bash
 curl -X POST http://127.0.0.1:8088/api/v1/tasks \
   -H 'Content-Type: application/json' \
-  -d '{
-    "command":["scripts/run_case.sh","--case","demo"],
-    "cwd":"/home/snskap/projects/demo",
-    "timeout_seconds":7200
-  }'
-
-curl http://127.0.0.1:8088/api/v1/tasks/<task_id>
-curl 'http://127.0.0.1:8088/api/v1/tasks?limit=50&offset=0'
-curl -X POST http://127.0.0.1:8088/api/v1/tasks/<task_id>/cancel
+  -d '{"command":["/bin/echo","hello"],"cwd":"/tmp","timeout_seconds":7200}'
 ```
 
-`command` 是参数数组，不经过 Shell；`cwd` 是 Worker 物理机上的绝对目录。可选 `input_path` 相对于 `cwd`，也可以传绝对路径。不需要配置共享目录；多 Worker 共用队列时，应在各机器准备相同的任务路径和文件。
+`command` 不经过 Shell，`cwd` 是 Worker 的绝对路径。查询结果包括 `job_info` 日志路径及文件 ID。
 
-每次 POST 创建一个新任务，不再使用 `Idempotency-Key`。队列重复通知仍由执行授权防止重复启动。结果 `result_path` 指向执行机器上 `VNC_LOG_DIR/tasks/<task_id>/<attempt_id>/task-output.json`，其内容分别列出带日期的 stdout/stderr 文件。
+测试需使用已迁移的专用测试数据库设置 `VNC_DATABASE_URL`，再运行 `.venv/bin/python -m pytest -q`；不要指向业务库。
 
-升级前停止旧版本服务，再执行 `alembic upgrade head`，迁移 `0004_drop_creation_key` 删除旧字段。旧相对 cwd 的排队任务请取消后用绝对路径重新创建；API 与 Worker 应同步更新。
-
-## Worker 操作
-
-Worker 接口部署在可信内网，不使用 Token：
-
-```bash
-curl http://127.0.0.1:8088/api/v1/workers
-```
-
-Worker 正常退出会携带当前 `session_id` 调用 shutdown。Worker 崩溃且旧租约阻止重新注册时，先确认物理机上的旧进程已经退出，再按 `.env` 中配置的 Worker IP 强制注销：
-
-```bash
-curl -X POST \
-  http://127.0.0.1:8088/api/v1/workers/192.168.10.21/unregister
-```
-
-强制注销会将尚未确认结果的任务标记为 `lost`，不会自动重跑。
-
-## 调度与恢复
-
-- 创建任务和 Outbox 事件在同一数据库事务提交。
-- Worker 获得数据库授权后才能启动任务。
-- 结果先写入 PostgreSQL，成功后才 ACK Redis。
-- 默认任务超时 7200 秒，从授权开始计算；排队时间不计入。
-- 默认租约 30 秒，由注册响应下发给 Worker。
-- 取消指令通过心跳响应持续下发，直到任务完成清理。
-- 对账循环补投长期 queued 任务，清理 abandoned pending 消息，并将失联执行标记为 `lost`。
-
-接口文档：`/docs`；OpenAPI：`/openapi.json`。Swagger UI 5.33.3 的 JS、CSS
-和图标已保存在 `src/static/`，运行时不会访问公网 CDN。未使用的 `/redoc`
-入口已关闭，避免浏览器尝试加载外网资源。
-
-## 测试
-
-迁移专用测试数据库后执行：
-
-```bash
-export VNC_DATABASE_URL='postgresql+asyncpg://<用户>:<密码>@127.0.0.1:5432/vnc_schedule_test'
-.venv/bin/alembic upgrade head
-.venv/bin/python -m pytest -q
-```
-
-不要让不同测试实例同时使用同一个测试数据库。真实 systemd、TurboVNC 和 Squish 行为由 Worker 的 CentOS 7 验收清单确认。
+系统需求、架构、部署和验收统一维护在 [vnc_build/docs](https://github.com/hhh17950/vnc_build/tree/main/docs)。

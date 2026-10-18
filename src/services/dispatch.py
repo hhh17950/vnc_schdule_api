@@ -1,3 +1,4 @@
+"""后台调度循环：Outbox 投递、对账与 PEL 恢复。"""
 import asyncio
 import time
 from datetime import timedelta
@@ -9,7 +10,7 @@ from sqlalchemy import select
 
 from src.core.config import Settings
 from src.core.database import session_factory
-from src.models import OutboxEvent, Task, TaskAttempt, Worker
+from src.models import OutboxEvent, Task, Worker
 from src.services.tasks import utcnow
 
 
@@ -48,32 +49,33 @@ async def dispatch_once(redis: Redis, settings: Settings) -> int:
 async def reconcile_once(settings: Settings) -> None:
     now = utcnow()
     async with session_factory() as session:
-        workers = await session.scalars(select(Worker).where(Worker.lease_until <= now).with_for_update(skip_locked=True))
+        # 租约过期的 worker 只清大盘快照，不改任务状态：失联等待最终态。
+        workers = await session.scalars(
+            select(Worker).where(Worker.lease_until <= now).with_for_update(skip_locked=True)
+        )
         for worker in workers:
-            attempts = await session.scalars(select(TaskAttempt).where(
-                TaskAttempt.worker_id == worker.id,
-                TaskAttempt.session_id == worker.session_id,
-                TaskAttempt.finished_at.is_(None),
-            ).with_for_update(skip_locked=True))
-            for attempt in attempts:
-                task = await session.get(Task, attempt.task_id, with_for_update=True)
-                if task and task.current_attempt_id == attempt.id and task.status in {
-                    "running", "cancel_requested", "timeout_requested"
-                }:
-                    task.status = "lost"
-                    task.updated_at = now
-                    task.error = "worker lease expired; execution result unknown"
-                    attempt.status = "lost"
-                    attempt.finished_at = now
             worker.slots = []
-        overdue = await session.scalars(select(TaskAttempt).where(
-            TaskAttempt.deadline_at <= now, TaskAttempt.finished_at.is_(None)
+        # deadline 到点：通知 worker 收尾；worker 存活时经心跳确认 timed_out。
+        due = await session.scalars(select(Task).where(
+            Task.status == "running",
+            Task.deadline_at.is_not(None),
+            Task.deadline_at <= now,
         ).with_for_update(skip_locked=True))
-        for attempt in overdue:
-            task = await session.get(Task, attempt.task_id, with_for_update=True)
-            if task and task.current_attempt_id == attempt.id and task.status == "running":
-                task.status = "timeout_requested"
-                task.updated_at = now
+        for task in due:
+            task.status = "timeout_requested"
+            task.updated_at = now
+        # deadline + 60s 兜底：无论取消/超时是否被确认，直接定 timed_out。
+        stale = await session.scalars(select(Task).where(
+            Task.status.in_(["running", "cancel_requested", "timeout_requested"]),
+            Task.deadline_at.is_not(None),
+            Task.deadline_at <= now - timedelta(seconds=60),
+        ).with_for_update(skip_locked=True))
+        for task in stale:
+            task.status = "timed_out"
+            task.finished_at = now
+            task.error = "deadline passed without a final result"
+            task.updated_at = now
+        # 长期 queued 的任务补投。
         queued = await session.scalars(select(Task).where(
             Task.status == "queued",
             Task.created_at <= now - timedelta(seconds=120),
@@ -98,7 +100,7 @@ async def reconcile_once(settings: Settings) -> None:
 
 
 async def recover_pending_once(redis: Redis, settings: Settings) -> None:
-    """Resolve abandoned PEL entries after checking the authoritative task state."""
+    """根据权威任务状态处理 Redis PEL 中无人确认的悬挂消息。"""
     cursor = "-"
     while True:
         entries = await redis.xpending_range(settings.stream, settings.group, cursor, "+", 100)
@@ -120,7 +122,7 @@ async def recover_pending_once(redis: Redis, settings: Settings) -> None:
                     await redis.xack(settings.stream, settings.group, message_id)
                     continue
                 if task.status == "queued":
-                    # PEL 中的旧消息只为未授权任务补发；运行中的任务绝不能直接重跑。
+                    # PEL 中的旧消息只为未授权任务补发；运行中的任务绝不重跑。
                     pending = await session.scalar(select(OutboxEvent.id).where(
                         OutboxEvent.task_id == task.id, OutboxEvent.sent_at.is_(None)
                     ))
@@ -136,7 +138,7 @@ async def recover_pending_once(redis: Redis, settings: Settings) -> None:
                         task.last_enqueued_at = now
                     await session.commit()
                     await redis.xack(settings.stream, settings.group, message_id)
-                elif task.status in {"succeeded", "failed", "cancelled", "timed_out", "lost"}:
+                elif task.status in {"succeeded", "failed", "cancelled", "timed_out", "unknown"}:
                     await redis.xack(settings.stream, settings.group, message_id)
         if len(entries) < 100:
             return

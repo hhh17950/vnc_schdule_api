@@ -1,7 +1,40 @@
-.venv/
-__pycache__/
-.pytest_cache/
+# Local configuration and credentials
 .env
-logs/
-.DS_Store
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+# Python and editor caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
 .idea/
+.vscode/
+.DS_Store
+# Runtime and build artifacts
+logs/
+job_log/
+*.log
+build/
+*.egg-info/
+.pyinstaller-cache/
+*.tar.gz
+*.zip
+*.iso
+*.rpm
+*.exe
+*.vmdk
+*.vmem
+*.vmss
+*.vmsn
+*.nvram
+dist/
+shared/
