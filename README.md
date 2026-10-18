@@ -51,4 +51,4 @@ curl -X POST http://127.0.0.1:8088/api/v1/tasks \
 
 测试需使用已迁移的专用测试数据库设置 `VNC_DATABASE_URL`，再运行 `.venv/bin/python -m pytest -q`；不要指向业务库。
 
-系统需求、架构、部署和验收统一维护在 [vnc_build/docs](https://github.com/hhh17950/vnc_build/tree/main/docs)。
+系统需求、架构、部署和验收统一维护在 [vnc_builder/docs](https://github.com/hhh17950/vnc_builder/tree/main/docs)。
